@@ -9,6 +9,13 @@ enum TargetType: String, Codable, CaseIterable { // Added CaseIterable for poten
     case unknown = "Unknown" // For fallback or initial state
 }
 
+/// A single timestamped probe outcome used by the latency graph.
+/// `latencyMs == nil` marks a failed probe (packet loss) at that instant.
+struct LatencySample {
+    let time: Date
+    let latencyMs: Double?
+}
+
 // Converted to a class conforming to ObservableObject
 class PingResult: ObservableObject, Identifiable, Equatable { // Added Equatable
     let id = UUID() // Stays the same for Identifiable & Equatable
@@ -26,9 +33,27 @@ class PingResult: ObservableObject, Identifiable, Equatable { // Added Equatable
     @Published var averageLatencyMs: Double?
     @Published var minimumLatencyMs: Double?
     @Published var maximumLatencyMs: Double?
+    /// Per-host pause: when true this target is excluded from ping rounds while
+    /// the rest of the session keeps running.
+    @Published var isPaused: Bool = false
+
+    /// Reverse-DNS (PTR) hostname for a bare-IP target that has no user note.
+    /// Resolved once in the background when pinging starts, so hosts outside the
+    /// local network (which have no MAC/vendor) still get an identity. nil until
+    /// resolved (or if the target already has a note / isn't an IP / has no PTR).
+    @Published var resolvedName: String?
 
     var latencyTotalMs: Double = 0
     var latencySampleCount: Int = 0
+
+    /// Rolling time-series of probe outcomes, consumed by the latency graph.
+    /// Pruned to the last 24 hours (the widest graph window) with a hard cap
+    /// so long-running sessions stay bounded in memory. Not @Published: it is
+    /// always mutated alongside another @Published stat within the same round,
+    /// so observers still refresh, and we avoid extra table reloads per sample.
+    var latencyHistory: [LatencySample] = []
+    private let historyRetention: TimeInterval = 24 * 60 * 60
+    private let historyHardCap = 200_000
 
     // Initializer for the class (UPDATED for note)
     init(targetValue: String, targetType: TargetType, note: String?, responseTime: String, successCount: Int, failureCount: Int, failureRate: Double, isSuccessful: Bool) {
@@ -66,6 +91,8 @@ class PingResult: ObservableObject, Identifiable, Equatable { // Added Equatable
         self.maximumLatencyMs = nil
         self.latencyTotalMs = 0
         self.latencySampleCount = 0
+        self.latencyHistory.removeAll(keepingCapacity: true)
+        self.isPaused = false
     }
 
     func recordLatency(milliseconds: Double) {
@@ -79,6 +106,41 @@ class PingResult: ObservableObject, Identifiable, Equatable { // Added Equatable
 
     func clearCurrentLatency() {
         currentLatencyMs = nil
+    }
+
+    /// Record a probe outcome in the rolling history. `milliseconds == nil`
+    /// denotes packet loss (a failed probe) at `time`.
+    func appendLatencySample(milliseconds: Double?, at time: Date) {
+        latencyHistory.append(LatencySample(time: time, latencyMs: milliseconds))
+        pruneLatencyHistory(now: time)
+    }
+
+    /// Number of probes, and how many were lost, at or after `cutoff`.
+    /// Walks newest-first and stops once older than the cutoff, so it stays cheap
+    /// even with a full day of history. Used by the graph's windowed-loss readout.
+    func windowStats(since cutoff: Date) -> (lost: Int, total: Int) {
+        var lost = 0
+        var total = 0
+        for sample in latencyHistory.reversed() {
+            if sample.time < cutoff { break }
+            total += 1
+            if sample.latencyMs == nil { lost += 1 }
+        }
+        return (lost, total)
+    }
+
+    private func pruneLatencyHistory(now: Date) {
+        let cutoff = now.addingTimeInterval(-historyRetention)
+        if let first = latencyHistory.first, first.time < cutoff {
+            if let keepFrom = latencyHistory.firstIndex(where: { $0.time >= cutoff }) {
+                latencyHistory.removeFirst(keepFrom)
+            } else {
+                latencyHistory.removeAll(keepingCapacity: true)
+            }
+        }
+        if latencyHistory.count > historyHardCap {
+            latencyHistory.removeFirst(latencyHistory.count - historyHardCap)
+        }
     }
 
     static func formatLatency(milliseconds: Double) -> String {

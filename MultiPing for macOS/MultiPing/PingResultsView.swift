@@ -26,28 +26,76 @@ enum ResultStatusPalette {
 
 struct PingResultsContainerView: View {
     @ObservedObject var manager: PingManager
-    let timeout: String
-    let interval: String
-    let size: String
-    let dscp: String
     @State private var viewMode: ResultsViewMode
     @State private var filterText: String = ""
+    @State private var selectedResultIDs: Set<UUID> = []
+    @AppStorage("EmbeddedGraphHeightV1") private var embeddedGraphHeight: Double = 250
+    @AppStorage("LatencyGraphEmbeddedCollapsedV1") private var embeddedCollapsed: Bool = false
+    @State private var dragStartHeight: Double? = nil
 
-    init(manager: PingManager, timeout: String, interval: String, size: String, dscp: String, initialMode: ResultsViewMode) {
+    init(manager: PingManager, initialMode: ResultsViewMode) {
         self.manager = manager
-        self.timeout = timeout
-        self.interval = interval
-        self.size = size
-        self.dscp = dscp
         self._viewMode = State(initialValue: initialMode)
     }
 
+    /// The target whose graph the embedded quick-view shows: the primary (first)
+    /// selection, or the first target as a sensible default.
+    private var primarySelected: PingResult? {
+        manager.results.first { selectedResultIDs.contains($0.id) } ?? manager.results.first
+    }
+
     var body: some View {
-        if viewMode == .list {
-            PingResultsView(manager: manager, timeout: timeout, interval: interval, size: size, dscp: dscp, viewMode: $viewMode, filterText: $filterText)
-        } else {
-            GridPingResultsView(manager: manager, timeout: timeout, interval: interval, size: size, dscp: dscp, viewMode: $viewMode, filterText: $filterText)
+        VStack(spacing: 0) {
+            Group {
+                if viewMode == .list {
+                    PingResultsView(manager: manager, viewMode: $viewMode, filterText: $filterText, selectedResultIDs: $selectedResultIDs)
+                } else {
+                    GridPingResultsView(manager: manager, viewMode: $viewMode, filterText: $filterText, selectedResultIDs: $selectedResultIDs)
+                }
+            }
+
+            if let selected = primarySelected {
+                Divider()
+                if !embeddedCollapsed { resizeHandle }
+                EmbeddedLatencyGraphView(result: selected, graphBodyHeight: CGFloat(embeddedGraphHeight))
+            }
         }
+        .onAppear {
+            if selectedResultIDs.isEmpty, let first = manager.results.first?.id {
+                selectedResultIDs = [first]
+            }
+        }
+        .onChange(of: manager.results.map(\.id)) { newIDs in
+            let pruned = selectedResultIDs.intersection(Set(newIDs))
+            if pruned.isEmpty {
+                selectedResultIDs = newIDs.first.map { [$0] } ?? []
+            } else if pruned != selectedResultIDs {
+                selectedResultIDs = pruned
+            }
+        }
+    }
+
+    /// Draggable divider above the embedded graph so the pane can be resized.
+    private var resizeHandle: some View {
+        ZStack {
+            Rectangle().fill(Color.gray.opacity(0.10))
+            RoundedRectangle(cornerRadius: 2).fill(Color.secondary.opacity(0.55)).frame(width: 46, height: 4)
+        }
+        .frame(height: 9)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    if dragStartHeight == nil { dragStartHeight = embeddedGraphHeight }
+                    let proposed = (dragStartHeight ?? embeddedGraphHeight) - Double(value.translation.height)
+                    embeddedGraphHeight = min(520, max(150, proposed))
+                }
+                .onEnded { _ in dragStartHeight = nil }
+        )
+        .help("Drag to resize the graph")
     }
 }
 
@@ -55,12 +103,9 @@ struct PingResultsContainerView: View {
 struct PingResultsView: View {
     // MARK: - Properties
     @ObservedObject var manager: PingManager
-    var timeout: String
-    var interval: String
-    var size: String
-    var dscp: String
     @Binding var viewMode: ResultsViewMode
     @Binding var filterText: String
+    @Binding var selectedResultIDs: Set<UUID>
 
     // MARK: - UI State
     @State private var sortColumn: SortColumn? = nil
@@ -118,11 +163,6 @@ struct PingResultsView: View {
         filter(results: manager.results, by: filterText)
     }
 
-    private var dscpStatusValue: String {
-        guard let dscpValue = Int(dscp), dscpValue > 0 else { return "Off" }
-        return dscp
-    }
-
     // MARK: - Body
     var body: some View {
         VStack(spacing: 0) {
@@ -141,9 +181,11 @@ struct PingResultsView: View {
             } else {
                 ListResultsTableView(
                     results: sortedResults,
+                    manager: manager,
                     sortColumn: $sortColumn,
                     sortAscending: $sortAscending,
-                    scale: listScale
+                    scale: listScale,
+                    selectedResultIDs: $selectedResultIDs
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -159,20 +201,7 @@ struct PingResultsView: View {
                     .background(Color.red.opacity(0.08))
             }
 
-            HStack(spacing: 15) {
-                StatusTextView(label: "Timeout:", value: "\(timeout) ms")
-                StatusTextView(label: "Interval:", value: "\(interval) s")
-                StatusTextView(label: "Size:", value: "\(size) B")
-                StatusTextView(label: "DSCP:", value: dscpStatusValue)
-                StatusTextView(label: "Status:", value: manager.pingStatus, color: .blue, weight: .bold)
-                Spacer()
-                StatusTextView(label: "Reachable:", value: "\(manager.reachableCount)", color: ResultStatusPalette.green, weight: .bold)
-                StatusTextView(label: "Failed:", value: "\(manager.failedCount)", color: ResultStatusPalette.red, weight: .bold)
-            }
-            .font(.callout)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 5)
-            .background(.bar)
+            ResultsStatusBar(manager: manager)
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -182,7 +211,7 @@ struct PingResultsView: View {
                     if isEffectivelyRunning {
                         manager.stopPingTasks(clearResults: true)
                     } else {
-                        manager.startPingTasks(timeout: timeout, interval: interval, size: size, dscp: dscp)
+                        manager.startPingTasks(timeout: manager.timeout, interval: manager.interval, size: manager.packetSize, dscp: manager.dscp)
                     }
                 } label: {
                     Label(isEffectivelyRunning ? "Stop & Clear" : "Start Ping",
@@ -207,6 +236,22 @@ struct PingResultsView: View {
                     Label("Grid Layout", systemImage: "square.grid.2x2")
                 }
                 .help("Switch to Grid Layout")
+
+                Button {
+                    TargetsCollectorPresenter.shared.show(manager: manager)
+                } label: {
+                    Label("Edit Targets", systemImage: "square.and.pencil")
+                }
+                .help("Edit the target list")
+
+                Button {
+                    let selected = manager.results.filter { selectedResultIDs.contains($0.id) }
+                    MultiLatencyGraphPresenter.shared.show(results: selected.isEmpty ? manager.results : selected)
+                } label: {
+                    Label("Multi-Host Graph", systemImage: "chart.line.uptrend.xyaxis")
+                }
+                .help("Graph selected hosts together (⌘-click rows to multi-select; all hosts if none selected)")
+                .disabled(manager.results.isEmpty)
 
                 Menu {
                     ForEach(PingResultsExportType.allCases) { type in
@@ -235,6 +280,13 @@ struct PingResultsView: View {
                 }
                 .help("Zoom In")
                 .disabled(listScale >= maxScale)
+
+                Button {
+                    showMultiPingAboutPanel()
+                } label: {
+                    Label("About", systemImage: "info.circle")
+                }
+                .help("About MultiPing")
             }
         }
         .labelStyle(.iconOnly)
@@ -286,12 +338,60 @@ struct ResultsFilterBar: View {
     }
 }
 
+/// The results-window status bar. Timeout / Interval / Size / DSCP are editable
+/// inline and applied live to the running session (press Return) without losing
+/// accumulated history.
+struct ResultsStatusBar: View {
+    @ObservedObject var manager: PingManager
+
+    private var dscpName: String { DSCPMark.name(for: Int(manager.dscp) ?? 0) }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            settingField(label: "Timeout", value: $manager.timeout, unit: "ms", width: 48)
+            settingField(label: "Interval", value: $manager.interval, unit: "ms", width: 48)
+            settingField(label: "Size", value: $manager.packetSize, unit: "B", width: 42)
+            settingField(label: "DSCP", value: $manager.dscp, unit: dscpName, width: 34)
+            labelValue("Status:", manager.pingStatus, color: .blue, weight: .bold)
+            Spacer()
+            labelValue("Reachable:", "\(manager.reachableCount)", color: ResultStatusPalette.green, weight: .bold)
+            labelValue("Failed:", "\(manager.failedCount)", color: ResultStatusPalette.red, weight: .bold)
+        }
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(.bar)
+    }
+
+    private func settingField(label: String, value: Binding<String>, unit: String, width: CGFloat) -> some View {
+        HStack(spacing: 3) {
+            Text(label).foregroundColor(.secondary)
+            TextField("", text: value)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: width)
+                .multilineTextAlignment(.trailing)
+                .monospacedDigit()
+                .onSubmit { manager.applyLiveSettings() }
+                .help("Edit and press Return to apply to the running session (kept live, history preserved)")
+            if !unit.isEmpty {
+                Text(unit).font(.caption).foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func labelValue(_ label: String, _ value: String, color: Color? = nil, weight: Font.Weight = .regular) -> some View {
+        Text(label + " ") + Text(value).fontWeight(weight).foregroundColor(color)
+    }
+}
+
 // MARK: - Native List Table
 private struct ListResultsTableView: NSViewRepresentable {
     let results: [PingResult]
+    let manager: PingManager
     @Binding var sortColumn: PingResultsView.SortColumn?
     @Binding var sortAscending: Bool
     let scale: CGFloat
+    @Binding var selectedResultIDs: Set<UUID>
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -305,13 +405,19 @@ private struct ListResultsTableView: NSViewRepresentable {
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.allowsColumnResizing = true
         tableView.allowsColumnReordering = true
-        tableView.allowsMultipleSelection = false
-        tableView.selectionHighlightStyle = .none
+        tableView.allowsMultipleSelection = true
+        tableView.selectionHighlightStyle = .regular
         tableView.columnAutoresizingStyle = .noColumnAutoresizing
         tableView.autosaveName = "PingResultsListTableColumnsV3"
         tableView.autosaveTableColumns = true
         tableView.dataSource = context.coordinator
         tableView.delegate = context.coordinator
+        tableView.target = context.coordinator
+        tableView.doubleAction = #selector(Coordinator.openGraphForClickedRow)
+
+        let rowMenu = NSMenu()
+        rowMenu.delegate = context.coordinator
+        tableView.menu = rowMenu
 
         for column in context.coordinator.orderedColumnDefinitions() {
             let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.id))
@@ -342,7 +448,7 @@ private struct ListResultsTableView: NSViewRepresentable {
         context.coordinator.reload(from: self)
     }
 
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         struct ColumnDefinition {
             let id: String
             let title: String
@@ -386,7 +492,42 @@ private struct ListResultsTableView: NSViewRepresentable {
             guard let tableView = tableView else { return }
             tableView.rowHeight = max(22, 24 * parent.scale)
             applySortDescriptors(to: tableView)
+            reloadPreservingSelection()
+        }
+
+        private var isSyncingSelection = false
+
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            // Ignore selection changes we caused programmatically (during reloads).
+            guard !isSyncingSelection, let tableView = tableView else { return }
+            let rows = sortedResults
+            let newIDs = Set(tableView.selectedRowIndexes.compactMap { index -> UUID? in
+                (index >= 0 && index < rows.count) ? rows[index].id : nil
+            })
+            if parent.selectedResultIDs != newIDs {
+                parent.selectedResultIDs = newIDs
+            }
+        }
+
+        /// Reload table data while preserving the user's (possibly multi-row)
+        /// selection. `reloadData()` runs every ping round and can transiently
+        /// clear the selection — firing a spurious selection-change that would
+        /// otherwise overwrite the binding with an empty set. Guarding the whole
+        /// operation with `isSyncingSelection` makes that transient change a
+        /// no-op, and we re-apply the selection from the binding afterwards.
+        private func reloadPreservingSelection() {
+            guard let tableView = tableView else { return }
+            isSyncingSelection = true
             tableView.reloadData()
+            let rows = sortedResults
+            var target = IndexSet()
+            for (index, result) in rows.enumerated() where parent.selectedResultIDs.contains(result.id) {
+                target.insert(index)
+            }
+            if tableView.selectedRowIndexes != target {
+                tableView.selectRowIndexes(target, byExtendingSelection: false)
+            }
+            isSyncingSelection = false
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int {
@@ -424,6 +565,23 @@ private struct ListResultsTableView: NSViewRepresentable {
             saveColumnOrder()
         }
 
+        @objc @MainActor func openGraphForClickedRow() {
+            guard let tableView = tableView else { return }
+            let row = tableView.clickedRow
+            let rows = sortedResults
+            guard row >= 0, row < rows.count else { return }
+            LatencyGraphPresenter.shared.show(result: rows[row])
+        }
+
+        func menuNeedsUpdate(_ menu: NSMenu) {
+            menu.removeAllItems()
+            guard let tableView = tableView else { return }
+            let row = tableView.clickedRow
+            let rows = sortedResults
+            guard row >= 0, row < rows.count else { return }
+            populateHostMenu(menu, for: rows[row], manager: parent.manager)
+        }
+
         func orderedColumnDefinitions() -> [ColumnDefinition] {
             let definitionsByID = Dictionary(uniqueKeysWithValues: columnDefinitions.map { ($0.id, $0) })
             let defaultIDs = columnDefinitions.map(\.id)
@@ -453,7 +611,7 @@ private struct ListResultsTableView: NSViewRepresentable {
                 result.objectWillChange
                     .receive(on: RunLoop.main)
                     .sink { [weak self] _ in
-                        self?.tableView?.reloadData()
+                        self?.reloadPreservingSelection()
                     }
             }
         }
@@ -508,7 +666,14 @@ private struct ListResultsTableView: NSViewRepresentable {
             case "target":
                 textField.stringValue = result.displayName
             case "note":
-                textField.stringValue = result.note ?? ""
+                if let note = result.note, !note.isEmpty {
+                    textField.stringValue = note
+                } else if let resolved = result.resolvedName {
+                    textField.stringValue = resolved
+                    textField.textColor = .secondaryLabelColor   // auto-resolved, not a user note
+                } else {
+                    textField.stringValue = ""
+                }
             case "current":
                 textField.stringValue = result.currentLatencyMs.map { PingResult.formatLatency(milliseconds: $0) } ?? result.responseTime
             case "average":
@@ -526,6 +691,27 @@ private struct ListResultsTableView: NSViewRepresentable {
             default:
                 textField.stringValue = ""
             }
+
+            // Paused hosts read as struck-through and dimmed. The paragraph style
+            // must carry the column alignment — an attributed string ignores the
+            // text field's own `alignment`.
+            if result.isPaused {
+                let dimmed = (textField.textColor ?? .labelColor).withAlphaComponent(0.45)
+                textField.textColor = dimmed
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.alignment = textField.alignment
+                paragraph.lineBreakMode = .byTruncatingTail
+                textField.attributedStringValue = NSAttributedString(
+                    string: textField.stringValue,
+                    attributes: [
+                        .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                        .strikethroughColor: dimmed,
+                        .foregroundColor: dimmed,
+                        .font: textField.font as Any,
+                        .paragraphStyle: paragraph
+                    ]
+                )
+            }
         }
     }
 }
@@ -538,6 +724,7 @@ func filter(results: [PingResult], by filterText: String) -> [PingResult] {
     return results.filter { result in
         result.displayName.lowercased().contains(query) ||
         (result.note?.lowercased().contains(query) ?? false) ||
+        (result.resolvedName?.lowercased().contains(query) ?? false) ||
         result.responseTime.lowercased().contains(query) ||
         result.targetType.rawValue.lowercased().contains(query)
     }

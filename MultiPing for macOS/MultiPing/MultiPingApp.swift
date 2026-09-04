@@ -7,6 +7,10 @@ import SwiftUI
 
     override init() {
         super.init()
+        // Must happen before the MenuBarExtra scene creates its status item —
+        // the item reads its preferred slot only at creation time.
+        MenuBarPrefs.seedIconPositionIfNeeded()
+        MenuBarPrefs.migrateSortOrderIfNeeded()
         // Set up KVO for new windows as early as possible.
         windowObservation = NSApp.observe(\.windows, options: [.initial, .new]) { [weak self] app, change in
             // .initial ensures this runs for windows existing at the time of observation.
@@ -17,15 +21,19 @@ import SwiftUI
             }
         }
     }
-    
+
     // This method is called after the application has finished launching and has processed its initial events.
-    // This is a good place to ensure delegates are set for any windows that might have been created
-    // by the time this method is called, though KVO with .initial should cover it.
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("AppDelegate: applicationDidFinishLaunching.")
         // KVO with .initial should have already called assignDelegateToAllWindows.
         // Calling it again here is a safeguard.
         assignDelegateToAllWindows()
+        MenuBarPrefs.applyActivationPolicy()
+        // Give AppKit a moment to place the status item, then rescue it if it
+        // landed somewhere macOS won't draw (e.g. under the camera notch).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            MenuBarPrefs.autoFixIconVisibility()
+        }
     }
 
     // Helper method to assign this AppDelegate instance as the delegate
@@ -35,7 +43,7 @@ import SwiftUI
             for window in NSApp.windows {
                 // We are interested in the main "Targets Collector" window and "Ping Results" windows.
                 let isRelevantWindowType = self.isRelevantWindow(window)
-                
+
                 // Only assign if it's a relevant window and the delegate is not already this instance.
                 if isRelevantWindowType && !(window.delegate is AppDelegate) {
                     print("AppDelegate: Assigning self as delegate to window: '\(window.title)' (ID: \(window.identifier?.rawValue ?? "N/A"))")
@@ -45,56 +53,36 @@ import SwiftUI
         }
     }
 
-    // Called just before the application terminates.
-    // This is our main cleanup point.
+    // Called just before the application terminates. This is our main cleanup point.
     func applicationWillTerminate(_ notification: Notification) {
         print("AppDelegate: Application will terminate. Performing final cleanup.")
         if let manager = AppDelegate.pingManagerInstance {
-            print("AppDelegate: Found PingManager instance (\(ObjectIdentifier(manager))). Preparing synchronous shutdown.")
             manager.prepareForAppTermination(clearResults: true)
-            print("AppDelegate: synchronous shutdown finished.")
-        } else {
-            print("AppDelegate: PingManager instance not found for final cleanup in applicationWillTerminate.")
         }
         windowObservation?.invalidate()
         windowObservation = nil
         print("AppDelegate: applicationWillTerminate finished.")
     }
 
-    // This delegate method is called when the user clicks the red close button on a window.
+    // Called when the user clicks the red close button on a window. The app now
+    // lives in the menu bar: closing a window (even the last) no longer stops
+    // pinging or quits — the session keeps running in the background and stays
+    // visible in the menu-bar at-a-glance view. Cleanup happens on quit.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        print("AppDelegate: windowShouldClose called for window: '\(sender.title)'")
-
-        // Determine if this is the last "relevant" window.
-        // Relevant windows are our main IP input window and any results windows.
-        // We count only visible windows that are of the types we manage.
-        let relevantWindows = NSApp.windows.filter { window in
-            return isRelevantWindow(window) && window.isVisible // Consider only visible windows
-        }
-        
-        print("AppDelegate: Number of relevant visible windows: \(relevantWindows.count)")
-        if relevantWindows.count == 1 && relevantWindows.first == sender {
-            print("AppDelegate: This is the last relevant window ('\(sender.title)'). Preparing ping shutdown before normal close.")
-            AppDelegate.pingManagerInstance?.prepareForAppTermination(clearResults: true)
-            return true
-        } else {
-            print("AppDelegate: Window '\(sender.title)' is not the last relevant window, or other relevant windows exist. Allowing this window to close normally.")
-            // This allows individual results windows to close if the main input window (or other results windows) are still open.
-            // The .onDisappear of the view within that window should handle its specific cleanup.
-            return true // Allow this specific window to close.
-        }
+        return true
     }
-    
-    // This method is called if all windows are closed AND windowShouldClose allowed the last window to close,
-    // OR if termination happens for other reasons where this check is made.
+
+    // Stay alive in the menu bar when all windows are closed — the MenuBarExtra
+    // scene is the always-available at-a-glance monitor and reopen control.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        print("AppDelegate: applicationShouldTerminateAfterLastWindowClosed called.")
-        // If windowShouldClose handled the last window by calling NSApp.terminate,
-        // this method might not be the primary decider for that specific path.
-        // However, if the last window was allowed to close normally by windowShouldClose
-        // (which shouldn't happen if it's the *actual* last relevant one per our logic),
-        // then the app should terminate.
-        // Generally, if we reach here, it means the app should terminate.
+        return false
+    }
+
+    // Clicking the Dock icon (or reopening the app) with no windows open brings
+    // the session back — a reopen path that works even if the menu-bar item is
+    // tucked away by a menu-bar manager.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { openMainMultiPingWindow() }
         return true
     }
 
@@ -113,6 +101,9 @@ import SwiftUI
 struct MultiPingApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var manager = PingManager()
+    /// Menu-bar preferences (see MultiPingSettingsView).
+    @AppStorage(MenuBarPrefs.showIconKey) private var showMenuBarIcon = true
+    @AppStorage(MenuBarPrefs.menuBarOnlyKey) private var menuBarOnly = false
 
     var body: some Scene {
         Window("Targets Collector", id: "ip-input") { // ID "ip-input" is used by AppDelegate
@@ -120,8 +111,34 @@ struct MultiPingApp: App {
                 .onAppear {
                     print("MultiPingApp: IPInputView appeared, assigning PingManager (\(ObjectIdentifier(manager))) to AppDelegate.")
                     AppDelegate.pingManagerInstance = manager
+                    MenuBarPrefs.applyActivationPolicy()
                     // AppDelegate's KVO with .initial should handle setting the window delegate for this initial window.
                 }
         }
+        .commands {
+            // Route the app-menu "About" to our custom, non-clipping About window.
+            CommandGroup(replacing: .appInfo) {
+                Button("About MultiPing for macOS") { showMultiPingAboutPanel() }
+            }
+            CommandGroup(after: .windowList) {
+                Divider()
+                Button("MultiPing Status…") { showMultiPingStatusWindow() }
+                    .keyboardShortcut("0", modifiers: [.command, .shift])
+            }
+        }
+
+        Settings {
+            MultiPingSettingsView()
+        }
+
+        // Menu-bar item: at-a-glance status + reopen control. As a persistent
+        // scene it also keeps the app (and its background pings) alive when all
+        // windows are closed, even when the icon itself is hidden.
+        MenuBarExtra(isInserted: $showMenuBarIcon) {
+            MenuBarContentView(manager: manager)
+        } label: {
+            MenuBarStatusLabel(manager: manager)
+        }
+        .menuBarExtraStyle(.window)
     }
 }

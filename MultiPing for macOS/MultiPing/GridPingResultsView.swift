@@ -1,16 +1,14 @@
 import SwiftUI
+import AppKit // For NSEvent modifier detection on card taps
 import Combine // Needed for ObservableObject
 
 // --- GridPingResultsView (Main View) ---
 struct GridPingResultsView: View {
     // MARK: - Properties
     @ObservedObject var manager: PingManager
-    var timeout: String
-    var interval: String
-    var size: String
-    var dscp: String
     @Binding var viewMode: ResultsViewMode
     @Binding var filterText: String
+    @Binding var selectedResultIDs: Set<UUID>
 
     // MARK: - Sorting Enum (Unchanged)
     enum GridSortCriteria: String, CaseIterable, Identifiable {
@@ -53,9 +51,17 @@ struct GridPingResultsView: View {
         }
     }
 
-    private var dscpStatusValue: String {
-        guard let dscpValue = Int(dscp), dscpValue > 0 else { return "Off" }
-        return dscp
+    @ViewBuilder
+    private func hostContextMenu(for result: PingResult) -> some View {
+        Button("Open HTTP") { HostActions.openHTTP(result) }
+        Button("Open HTTPS") { HostActions.openHTTPS(result) }
+        Button("Open SSH") { HostActions.openSSH(result) }
+        Divider()
+        Button(result.isPaused ? "Resume pinging" : "Pause pinging") {
+            manager.setHostPaused(result, paused: !result.isPaused)
+        }
+        Divider()
+        Button("Launch port scan…") { PortScanPresenter.shared.show(host: result.targetValue) }
     }
 
     // MARK: - Body
@@ -75,7 +81,24 @@ struct GridPingResultsView: View {
                 } else {
                     LazyVGrid(columns: gridColumns, alignment: .leading, spacing: cellSpacing) {
                         ForEach(sortedGridResults) { result in
-                            GridCellView(result: result, scale: gridScale)
+                            GridCellView(
+                                result: result,
+                                scale: gridScale,
+                                isSelected: selectedResultIDs.contains(result.id),
+                                onSelect: {
+                                    if NSEvent.modifierFlags.contains(.command) {
+                                        if selectedResultIDs.contains(result.id) {
+                                            selectedResultIDs.remove(result.id)
+                                        } else {
+                                            selectedResultIDs.insert(result.id)
+                                        }
+                                    } else {
+                                        selectedResultIDs = [result.id]
+                                    }
+                                },
+                                onOpenGraph: { LatencyGraphPresenter.shared.show(result: result) }
+                            )
+                            .contextMenu { hostContextMenu(for: result) }
                         }
                     }
                     .padding(cellSpacing)
@@ -95,17 +118,7 @@ struct GridPingResultsView: View {
             }
 
             // Status Bar Area (Unchanged)
-            HStack(spacing: 15) {
-                StatusTextView(label: "Timeout:", value: "\(timeout) ms")
-                StatusTextView(label: "Interval:", value: "\(interval) s")
-                StatusTextView(label: "Size:", value: "\(size) B")
-                StatusTextView(label: "DSCP:", value: dscpStatusValue)
-                StatusTextView(label: "Status:", value: manager.pingStatus, color: .blue, weight: .bold)
-                Spacer()
-                StatusTextView(label: "Reachable:", value: "\(manager.reachableCount)", color: ResultStatusPalette.green, weight: .bold)
-                StatusTextView(label: "Failed:", value: "\(manager.failedCount)", color: ResultStatusPalette.red, weight: .bold)
-            }
-            .font(.callout).padding(.horizontal, 12).padding(.vertical, 5).background(.bar)
+            ResultsStatusBar(manager: manager)
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -115,7 +128,7 @@ struct GridPingResultsView: View {
                     if isEffectivelyRunning {
                         manager.stopPingTasks(clearResults: true)
                     } else {
-                        manager.startPingTasks(timeout: timeout, interval: interval, size: size, dscp: dscp)
+                        manager.startPingTasks(timeout: manager.timeout, interval: manager.interval, size: manager.packetSize, dscp: manager.dscp)
                     }
                 } label: {
                     Label(isEffectivelyRunning ? "Stop & Clear" : "Start Ping",
@@ -140,6 +153,22 @@ struct GridPingResultsView: View {
                     Label("List Layout", systemImage: "list.bullet")
                 }
                 .help("Switch to List Layout")
+
+                Button {
+                    TargetsCollectorPresenter.shared.show(manager: manager)
+                } label: {
+                    Label("Edit Targets", systemImage: "square.and.pencil")
+                }
+                .help("Edit the target list")
+
+                Button {
+                    let selected = manager.results.filter { selectedResultIDs.contains($0.id) }
+                    MultiLatencyGraphPresenter.shared.show(results: selected.isEmpty ? manager.results : selected)
+                } label: {
+                    Label("Multi-Host Graph", systemImage: "chart.line.uptrend.xyaxis")
+                }
+                .help("Graph selected hosts together (⌘-click cards to multi-select; all hosts if none selected)")
+                .disabled(manager.results.isEmpty)
 
                 Menu {
                     ForEach(PingResultsExportType.allCases) { type in
@@ -189,6 +218,13 @@ struct GridPingResultsView: View {
                 }
                 .help("Zoom In")
                 .disabled(gridScale >= maxScale)
+
+                Button {
+                    showMultiPingAboutPanel()
+                } label: {
+                    Label("About", systemImage: "info.circle")
+                }
+                .help("About MultiPing")
             }
         }
         .labelStyle(.iconOnly)
@@ -198,6 +234,9 @@ struct GridPingResultsView: View {
     internal struct GridCellView: View {
         @ObservedObject var result: PingResult
         let scale: CGFloat
+        let isSelected: Bool
+        let onSelect: () -> Void
+        let onOpenGraph: () -> Void
         private let baseTargetFontSizeIPv4: CGFloat = 13
         private let baseTargetFontSizeOther: CGFloat = 11
         private let baseNoteFontSize: CGFloat = 10 // New
@@ -205,9 +244,12 @@ struct GridPingResultsView: View {
         private let baseCountFontSize: CGFloat = 12
         private var cellHeight: CGFloat { 108 * scale }
 
-        internal init(result: PingResult, scale: CGFloat) {
+        internal init(result: PingResult, scale: CGFloat, isSelected: Bool, onSelect: @escaping () -> Void, onOpenGraph: @escaping () -> Void) {
             self.result = result
             self.scale = scale
+            self.isSelected = isSelected
+            self.onSelect = onSelect
+            self.onOpenGraph = onOpenGraph
         }
 
         private var backgroundColor: Color {
@@ -231,6 +273,7 @@ struct GridPingResultsView: View {
                 Text(result.displayName)
                     .font(.system(size: targetDisplayNameFontSize, weight: .medium, design: .monospaced))
                     .foregroundColor(ResultStatusPalette.swiftColor(for: result))
+                    .strikethrough(result.isPaused)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.bottom, (result.note != nil ? 0 : 2) * scale) // Adjust padding if note exists
@@ -239,6 +282,13 @@ struct GridPingResultsView: View {
                     Text(note)
                         .font(.system(size: baseNoteFontSize * scale, design: .monospaced))
                         .foregroundColor(ResultStatusPalette.swiftColor(for: result).opacity(0.82))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 2 * scale)
+                } else if let resolved = result.resolvedName { // Reverse-DNS name when no user note
+                    Text(resolved)
+                        .font(.system(size: baseNoteFontSize * scale, design: .monospaced))
+                        .foregroundColor(ResultStatusPalette.swiftColor(for: result).opacity(0.55))
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.bottom, 2 * scale)
@@ -260,6 +310,26 @@ struct GridPingResultsView: View {
             }
             .padding(8 * scale).background(backgroundColor).cornerRadius(6 * scale)
             .frame(height: cellHeight, alignment: .top).clipShape(RoundedRectangle(cornerRadius: 6 * scale))
+            .opacity(result.isPaused ? 0.55 : 1)
+            .overlay {
+                RoundedRectangle(cornerRadius: 6 * scale)
+                    .stroke(Color.accentColor, lineWidth: 2)
+                    .opacity(isSelected ? 1 : 0)
+            }
+            .overlay(alignment: .topTrailing) {
+                Button(action: onOpenGraph) {
+                    Image(systemName: "chart.xyaxis.line")
+                        .font(.system(size: 10 * scale))
+                        .foregroundColor(ResultStatusPalette.swiftColor(for: result))
+                        .padding(4 * scale)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Open latency graph in a separate window")
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { onSelect() }
+            .help("Click to show \(result.displayName) in the graph below")
         }
     }
 

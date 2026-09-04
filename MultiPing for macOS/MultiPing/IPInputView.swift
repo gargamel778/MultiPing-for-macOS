@@ -9,13 +9,24 @@ enum ResultsViewMode: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+/// How the Targets Collector sources its hosts: the saved manual list, or a
+/// live network scan.
+enum TargetInputMode: String, CaseIterable, Identifiable {
+    case myHosts = "My Hosts"
+    case networkScan = "Network Scan"
+    var id: String { self.rawValue }
+}
+
 struct IPInputView: View {
     @ObservedObject var manager: PingManager
     @State var timeout: String = "2000"
     @State var size: String = "32"
-    @State var interval: String = "3"
+    // Ping interval in milliseconds, remembered between sessions (min 100 ms).
+    @AppStorage("PingIntervalMsV1") var interval: String = "1000"
     @State var dscp: String = "0"
     @State private var selectedViewMode: ResultsViewMode = .list
+    @State private var inputMode: TargetInputMode = .myHosts
+    @StateObject private var scanModel = NetworkScanModel()
 
     private var placeholderText: String = """
 e.g.,
@@ -37,9 +48,9 @@ Notes are optional. Use comma, space, or tab to separate target from note.
         return parseTargets(from: manager.ipInput).count
     }
 
-    var suggestedInterval: Int {
-        let timeoutMs = Int(timeout) ?? 2000
-        return max(1, (timeoutMs / 1000) + 1)
+    /// Targets that "Start ping" will act on, depending on the active mode.
+    var activeTargetCount: Int {
+        inputMode == .myHosts ? validTargetCount : scanModel.selectedCount
     }
 
     var dscpMarkDescription: String {
@@ -56,7 +67,7 @@ Notes are optional. Use comma, space, or tab to separate target from note.
             HStack(alignment: .bottom, spacing: 15) {
                 VStack(alignment: .leading) { Text("Timeout (ms)").font(.caption); TextField("2000", text: $timeout).textFieldStyle(RoundedBorderTextFieldStyle()).frame(width: 80) }
                 VStack(alignment: .leading) { Text("Size (bytes)").font(.caption); TextField("32", text: $size).textFieldStyle(RoundedBorderTextFieldStyle()).frame(width: 80) }
-                VStack(alignment: .leading) { Text("Interval (s)").font(.caption); TextField("", text: $interval).textFieldStyle(RoundedBorderTextFieldStyle()).frame(width: 80) }
+                VStack(alignment: .leading) { Text("Interval (ms)").font(.caption); TextField("1000", text: $interval).textFieldStyle(RoundedBorderTextFieldStyle()).frame(width: 80) }
                 VStack(alignment: .leading) {
                     Text("DSCP (0-63)").font(.caption)
                     HStack(spacing: 6) {
@@ -72,49 +83,133 @@ Notes are optional. Use comma, space, or tab to separate target from note.
                 Spacer()
             }.padding(.top).padding(.horizontal)
 
-            // Engine Notice Text
-            Text("Notice:\nMultiPing now uses a bundled fping engine for bulk ICMP probing. If the engine is unavailable, the test will stop and show repair guidance instead of falling back to legacy ping.")
-                .font(.footnote).fontWeight(.bold).foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal).padding(.bottom, 5)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // Source Mode Switcher: saved manual list vs. live network scan.
+            Picker("", selection: $inputMode) {
+                ForEach(TargetInputMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+            }.pickerStyle(.segmented).labelsHidden().frame(maxWidth: 320).padding(.horizontal)
 
-            // Target Input Area Label
-            Text("Enter Targets (Each target on a separate line; notes optional)").font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: $manager.ipInput).frame(maxWidth: .infinity, maxHeight: .infinity).border(Color.gray.opacity(0.5), width: 1)
-                if manager.ipInput.isEmpty { Text(placeholderText).foregroundColor(.secondary).padding(.leading, 5).padding(.top, 8).allowsHitTesting(false) }
-            }.padding(.horizontal).layoutPriority(1)
+            if inputMode == .myHosts {
+                // Engine Notice Text
+                Text("Notice:\nMultiPing now uses a bundled fping engine for bulk ICMP probing. If the engine is unavailable, the test will stop and show repair guidance instead of falling back to legacy ping.")
+                    .font(.footnote).fontWeight(.bold).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal).padding(.bottom, 5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                // Target Input Area Label
+                Text("Enter Targets (Each target on a separate line; notes optional)").font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
+                ZStack(alignment: .topLeading) {
+                    TextEditor(text: $manager.ipInput).frame(maxWidth: .infinity, maxHeight: .infinity).border(Color.gray.opacity(0.5), width: 1)
+                    if manager.ipInput.isEmpty { Text(placeholderText).foregroundColor(.secondary).padding(.leading, 5).padding(.top, 8).allowsHitTesting(false) }
+                }.padding(.horizontal).layoutPriority(1)
+            } else {
+                NetworkScanView(model: scanModel)
+                    .padding(.horizontal).layoutPriority(1)
+            }
 
             // Bottom Row (Controls)
             HStack {
-                Text("Count of Targets: \(validTargetCount)")
+                Text(inputMode == .myHosts ? "Count of Targets: \(validTargetCount)" : "Selected hosts: \(scanModel.selectedCount)")
                     .font(.callout).foregroundColor(.secondary).padding(.trailing, 20)
-                Text("                           Monitoring layout:").font(.callout).padding(.trailing, 10)
+                Text("Monitoring layout:").font(.callout).padding(.trailing, 10)
                 Picker("", selection: $selectedViewMode) {
                     ForEach(ResultsViewMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
                 }.pickerStyle(.segmented).frame(maxWidth: 200)
+                    .help("Choose the monitoring layout for the results window")
                 Spacer()
-                Button("Start ping") { prepareAndStartPing() }
-                    .buttonStyle(.borderedProminent).disabled(validTargetCount == 0)
+                if inputMode == .networkScan {
+                    Button("Add to My Hosts") { addSelectedScanHostsToMyHosts() }
+                        .disabled(scanModel.selectedCount == 0)
+                        .help("Append the selected discovered hosts to your saved My Hosts list")
+                }
+                Button("Start ping") { startPing() }
+                    .buttonStyle(.borderedProminent).disabled(activeTargetCount == 0)
+                    .help(inputMode == .myHosts ? "Begin pinging all targets" : "Begin pinging the selected discovered hosts")
             }.padding(.horizontal).padding(.bottom)
 
         }
-        .padding(.top).frame(minWidth: 500, minHeight: 380)
-        .onChange(of: validTargetCount) { _ in interval = String(suggestedInterval) }
-        .onChange(of: timeout) { _ in
-            if validTargetCount > 0 {
-                interval = String(suggestedInterval)
-            }
+        .padding(.top)
+        .frame(minWidth: inputMode == .networkScan ? 680 : 480,
+               minHeight: inputMode == .networkScan ? 460 : 380)
+        .onChange(of: inputMode) { newMode in
+            if newMode == .networkScan { growCollectorWindowForScan() }
         }
-        .onAppear { interval = String(suggestedInterval) }
+    }
+
+    /// Switching to Network Scan grows the collector to a size that comfortably
+    /// shows the IP/Name/MAC/Vendor table. Never shrinks an already-larger window,
+    /// and leaves My Hosts alone.
+    private func growCollectorWindowForScan() {
+        guard let window = NSApp.windows.first(where: {
+            $0.identifier?.rawValue == "ip-input" || $0.title == "Targets Collector"
+        }) else { return }
+        let target = NSSize(width: 880, height: 660)
+        let frame = window.frame
+        let newWidth = max(frame.width, target.width)
+        let newHeight = max(frame.height, target.height)
+        guard newWidth > frame.width || newHeight > frame.height else { return }
+        let topLeftY = frame.origin.y + frame.height        // keep the top edge anchored
+        let newFrame = NSRect(x: frame.origin.x, y: topLeftY - newHeight, width: newWidth, height: newHeight)
+        window.setFrame(newFrame, display: true, animate: true)
+    }
+
+    /// Append the hosts selected in a scan to the persistent My Hosts list
+    /// (`ip, name`), skipping any target already present. Does not touch the scan.
+    func addSelectedScanHostsToMyHosts() {
+        let selected = scanModel.hosts.filter { $0.isSelected }
+        guard !selected.isEmpty else { return }
+        let existing = Set(parseTargets(from: manager.ipInput).map { $0.value.lowercased() })
+        var newLines: [String] = []
+        for host in selected where !existing.contains(host.ip.lowercased()) {
+            if let name = host.name, !name.isEmpty { newLines.append("\(host.ip), \(name)") }
+            else { newLines.append(host.ip) }
+        }
+        guard !newLines.isEmpty else {
+            scanModel.statusText = "All selected hosts are already in My Hosts."
+            return
+        }
+        var text = manager.ipInput
+        if !text.isEmpty && !text.hasSuffix("\n") { text += "\n" }
+        text += newLines.joined(separator: "\n") + "\n"
+        manager.ipInput = text   // didSet persists to UserDefaults
+        scanModel.statusText = "Added \(newLines.count) host(s) to My Hosts."
+    }
+
+    /// Route "Start ping" to the manual list or the scan selection.
+    func startPing() {
+        if inputMode == .myHosts {
+            prepareAndStartPing()
+        } else {
+            startPingForScanHosts()
+        }
+    }
+
+    /// Build the results session from the hosts selected in a network scan and
+    /// begin pinging them (using their resolved name as the note).
+    func startPingForScanHosts() {
+        let selected = scanModel.hosts.filter { $0.isSelected }
+        guard !selected.isEmpty else { return }
+        validateSettings()
+        let inputWindow = NSApp.keyWindow
+        manager.results.removeAll()
+        manager.pingStarted = false
+        for host in selected {
+            manager.results.append(PingResult(targetValue: host.ip,
+                                              targetType: host.targetType,
+                                              note: host.name,
+                                              responseTime: "Pending",
+                                              successCount: 0, failureCount: 0,
+                                              failureRate: 0.0, isSuccessful: false))
+        }
+        manager.startPingTasks(timeout: self.timeout, interval: self.interval, size: self.size, dscp: self.dscp)
+        openResultsWindow(mode: selectedViewMode)
+        inputWindow?.close()
     }
 
     func validateSettings() {
         let timeoutValue = max(1, Int(timeout) ?? 2000)
         let sizeValue = max(0, Int(size) ?? 32)
-        let minimumInterval = max(1, (timeoutValue / 1000) + 1)
-        let intervalValue = max(minimumInterval, Int(interval) ?? minimumInterval)
+        let intervalValue = max(100, Int(interval) ?? 1000)   // interval in ms, floor 100 ms
         let dscpValue = min(63, max(0, Int(dscp) ?? 0))
 
         timeout = String(timeoutValue)
@@ -225,47 +320,8 @@ Notes are optional. Use comma, space, or tab to separate target from note.
     }
 
     func openResultsWindow(mode: ResultsViewMode) {
-        let windowTitle: String
-        switch mode {
-        case .list: windowTitle = "Ping Results"
-        case .grid: windowTitle = "Ping Results"
-        }
-        let newWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 520), styleMask: [.titled, .closable, .resizable, .miniaturizable, .unifiedTitleAndToolbar], backing: .buffered, defer: false)
-        newWindow.center(); newWindow.setFrameAutosaveName("Ping Results Window - \(mode.rawValue)");
-        newWindow.title = windowTitle
-        newWindow.identifier = NSUserInterfaceItemIdentifier("ping-results")
-        newWindow.contentView = NSHostingView(rootView: PingResultsContainerView(manager: manager, timeout: timeout, interval: interval, size: size, dscp: dscpDescription(), initialMode: mode)
-            .onDisappear { // Add onDisappear to the root view of the results window
-                print("Results window (\(windowTitle)) disappearing. Stopping pings for this session (if active).")
-                // Only stop if pings were actually running for this session.
-                // The manager's global pingStatus might be "Pinging..." due to this session.
-                if manager.pingStatus == "Pinging..." || manager.pingStatus == "Paused" {
-                     // Check if this window closing means no other relevant windows are open.
-                     // If so, the app termination will handle full cleanup.
-                     // Otherwise, just stop the current tasks without clearing all results.
-                    let relevantWindows = NSApp.windows.filter { win in
-                        let isRelevantType = win.identifier?.rawValue == "ip-input" || win.title.starts(with: "Ping Results")
-                        return isRelevantType && win.isVisible && win != newWindow // Exclude the window being closed
-                    }
-                    if relevantWindows.isEmpty {
-                        print("This was the last relevant window, app termination will handle full cleanup.")
-                        // NSApp.terminate(nil) // This might be too aggressive here, let windowShouldClose handle it.
-                    } else {
-                         print("Other relevant windows still open. Stopping pings for this specific results window session.")
-                         manager.stopPingTasks(clearResults: false) // Stop pings but don't clear results from other potential sessions.
-                    }
-                }
-            }
-        )
-        
-        // MODIFIED: Explicitly set the AppDelegate as the delegate for the new results window.
-        if let appDelegate = NSApp.delegate as? AppDelegate {
-            print("IPInputView: Assigning AppDelegate as delegate to new results window: '\(windowTitle)'")
-            newWindow.delegate = appDelegate
-        } else {
-            print("IPInputView: Could not find AppDelegate to assign to new results window.")
-        }
-        
-        newWindow.makeKeyAndOrderFront(nil)
+        // Single shared opener (configures the window to survive close without
+        // crashing the close animation, and attaches no ping-stopping onDisappear).
+        openMultiPingResultsWindow(manager: manager, mode: mode)
     }
 }

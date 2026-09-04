@@ -17,14 +17,17 @@ class PingManager: ObservableObject {
     @Published var failedCount: Int = 0
     @Published var engineErrorMessage: String? = nil
 
-    private var pingTaskGroup: Task<Void, Never>? = nil
-    private var currentTimeout: String = "2000"
-    private var currentInterval: String = "3"
-    private var currentSize: String = "32"
-    private var currentDscp: String = "0"
+    // Live probe settings — editable from the results window's status bar and
+    // applied to the running engine without resetting accumulated data.
+    @Published var timeout: String = "2000"
+    @Published var interval: String = "1000"
+    @Published var packetSize: String = "32"
+    @Published var dscp: String = "0"
     private let fpingEngine = FpingEngine()
-    private let maxEngineRestartAttempts = 2
-    private let engineRestartDelayNs: UInt64 = 500_000_000
+
+    /// Background reverse-DNS resolver for bare-IP targets (see resolveReverseDNSNames).
+    private let reverseDNSQueue = DispatchQueue(label: "com.multiping.reverseDNS", qos: .utility, attributes: .concurrent)
+    private let reverseDNSLimit = DispatchSemaphore(value: 8)
 
     init() {
         self.ipInput = UserDefaults.standard.string(forKey: userDefaultsIPKey) ?? ""
@@ -32,58 +35,150 @@ class PingManager: ObservableObject {
     }
 
     deinit {
-        print("PingManager deinit called. Current status: \(pingStatus)")
-        pingTaskGroup?.cancel()
-        pingTaskGroup = nil
+        fpingEngine.stop()
     }
 
     func startPingTasks(timeout: String, interval: String, size: String, dscp: String) {
         guard !pingStarted else { return }
 
         let isResuming = (pingStatus == "Paused")
-        self.currentTimeout = timeout
-        self.currentInterval = interval
-        self.currentSize = size
-        self.currentDscp = dscp
+        self.timeout = timeout
+        self.interval = interval
+        self.packetSize = size
+        self.dscp = dscp
 
         pingStarted = true
         isPaused = false
         pingStatus = "Pinging..."
         engineErrorMessage = nil
 
-        Task { @MainActor in
-            if !isResuming {
-                for result in results {
-                    result.resetStats(initialStatus: "Pinging...")
-                }
-                self.updateTotalCounts()
-            } else {
-                for result in results where result.responseTime.lowercased() == "paused" {
-                    result.responseTime = "Pinging..."
-                }
+        if !isResuming {
+            for result in results {
+                result.resetStats(initialStatus: "Pinging...")
+            }
+        } else {
+            for result in results where result.responseTime.lowercased() == "paused" {
+                result.responseTime = "Pinging..."
             }
         }
 
-        pingTaskGroup?.cancel()
-        pingTaskGroup = Task {
-            await runPingLoop()
-            if !Task.isCancelled {
-                await MainActor.run {
-                    if self.pingStarted && !self.isPaused {
-                        self.pingStarted = false
-                        self.pingStatus = "Completed"
-                    }
-                    if self.pingStatus != "Pinging..." {
-                        for result in self.results where result.responseTime.lowercased() == "pinging..." {
-                            result.responseTime = self.pingStatus
-                            if ["Completed", "Stopped", "Cleared", "Cancelled"].contains(self.pingStatus) {
-                                result.isSuccessful = false
-                            }
-                        }
-                    }
-                    self.updateTotalCounts()
+        updateTotalCounts()
+        startEngine()
+        resolveReverseDNSNames()
+    }
+
+    /// Resolve a reverse-DNS (PTR) name for every bare-IP target that has no user
+    /// note, so hosts outside the local network — which have no MAC/vendor — still
+    /// get an identity in the results. Runs off the main thread, concurrency-capped
+    /// so many no-PTR hosts can't stall the pool; each name is applied on main once.
+    func resolveReverseDNSNames() {
+        for result in results {
+            guard result.resolvedName == nil,
+                  (result.note?.isEmpty ?? true),
+                  result.targetType == .ipv4 || result.targetType == .ipv6 else { continue }
+            let ip = result.targetValue
+            let id = result.id
+            reverseDNSQueue.async { [weak self] in
+                guard let self else { return }
+                self.reverseDNSLimit.wait()
+                let name = ReverseDNS.hostname(for: ip)
+                self.reverseDNSLimit.signal()
+                guard let name else { return }
+                DispatchQueue.main.async {
+                    self.results.first(where: { $0.id == id })?.resolvedName = name
                 }
             }
+        }
+    }
+
+    /// (Re)start the streaming engine for the currently active (non-paused) hosts.
+    private func startEngine() {
+        guard pingStarted, !isPaused else { return }
+
+        let timeoutMs = Int(timeout) ?? 2000
+        let packetSizeValue = Int(packetSize) ?? 32
+        let dscpValue = Int(dscp) ?? 0
+        let intervalMs = Int(interval) ?? 1000
+        let targets = results
+            .filter { !$0.isPaused }
+            .map { FpingTarget(id: $0.id, value: $0.targetValue, type: $0.targetType) }
+
+        do {
+            try fpingEngine.start(
+                targets: targets,
+                timeoutMs: timeoutMs,
+                packetSize: packetSizeValue,
+                dscp: dscpValue,
+                intervalMs: intervalMs,
+                onResult: { [weak self] id, probe in self?.handleStreamResult(id, probe) },
+                onFatal: { [weak self] message in self?.handleFatal(message) }
+            )
+        } catch {
+            handleFatal((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+        }
+    }
+
+    /// Apply one streamed per-host result. Called on the main thread.
+    private func handleStreamResult(_ id: UUID, _ probe: FpingProbeResult) {
+        guard pingStarted, !isPaused else { return }
+        guard let result = results.first(where: { $0.id == id }), !result.isPaused else { return }
+
+        engineErrorMessage = nil
+        result.responseTime = probe.responseTime
+        result.isSuccessful = probe.isSuccessful
+
+        let now = Date()
+        if probe.isSuccessful {
+            result.successCount += 1
+            if let latency = probe.latencyMilliseconds {
+                result.recordLatency(milliseconds: latency)
+                result.appendLatencySample(milliseconds: latency, at: now)
+            } else {
+                result.clearCurrentLatency()
+            }
+        } else {
+            result.clearCurrentLatency()
+            result.failureCount += 1
+            result.appendLatencySample(milliseconds: nil, at: now)
+        }
+
+        let total = result.successCount + result.failureCount
+        result.failureRate = total > 0 ? (Double(result.failureCount) / Double(total)) * 100.0 : 0.0
+        updateTotalCounts()
+    }
+
+    private func handleFatal(_ message: String) {
+        fpingEngine.stop()
+        pingStarted = false
+        isPaused = false
+        pingStatus = "Engine Unavailable"
+        engineErrorMessage = (message.hasPrefix("The bundled fping engine"))
+            ? message
+            : "The bundled fping engine returned a fatal error: \(message)"
+
+        for result in results where ["pinging...", "pending"].contains(result.responseTime.lowercased()) {
+            result.responseTime = "Engine unavailable"
+            result.isSuccessful = false
+        }
+        updateTotalCounts()
+    }
+
+    /// Pause or resume pinging a single host. The engine is restarted with the
+    /// updated host set so a paused host actually stops being pinged.
+    func setHostPaused(_ result: PingResult, paused: Bool) {
+        result.isPaused = paused
+        if paused {
+            result.isSuccessful = false
+            result.clearCurrentLatency()
+            result.responseTime = "Paused"
+        } else {
+            let active = pingStarted && !isPaused
+            result.responseTime = active ? "Pinging..." : "Pending"
+        }
+        updateTotalCounts()
+
+        if pingStarted && !isPaused {
+            startEngine()
         }
     }
 
@@ -94,63 +189,59 @@ class PingManager: ObservableObject {
             isPaused = true
             pingStarted = false
             pingStatus = "Paused"
-            pingTaskGroup?.cancel()
-            pingTaskGroup = nil
-
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                for result in self.results where result.responseTime.lowercased() == "pinging..." {
-                    result.responseTime = "Paused"
-                }
-                self.updateTotalCounts()
+            fpingEngine.stop()
+            for result in results where result.responseTime.lowercased() == "pinging..." {
+                result.responseTime = "Paused"
             }
+            updateTotalCounts()
         } else {
-            startPingTasks(timeout: currentTimeout, interval: currentInterval, size: currentSize, dscp: currentDscp)
+            startPingTasks(timeout: timeout, interval: interval, size: packetSize, dscp: dscp)
+        }
+    }
+
+    /// Validate the (edited) settings and restart the streaming engine with them,
+    /// keeping all accumulated stats and history. Used by the status-bar editors.
+    func applyLiveSettings() {
+        timeout = String(max(1, Int(timeout) ?? 2000))
+        interval = String(max(100, Int(interval) ?? 1000))   // interval floor 100 ms
+        packetSize = String(max(0, Int(packetSize) ?? 32))
+        dscp = String(min(63, max(0, Int(dscp) ?? 0)))
+        if pingStarted && !isPaused {
+            startEngine()
         }
     }
 
     func stopPingTasks(clearResults: Bool) {
-        let previousStatus = self.pingStatus
+        let previousStatus = pingStatus
         let wasEffectivelyRunning = pingStarted || previousStatus == "Pinging..." || previousStatus == "Paused"
 
-        pingTaskGroup?.cancel()
-        pingTaskGroup = nil
+        fpingEngine.stop()
         pingStarted = false
         isPaused = false
 
         let newFinalStatus = clearResults ? "Cleared" : "Stopped"
+        pingStatus = newFinalStatus
+        if clearResults { engineErrorMessage = nil }
 
-        Task { @MainActor [weak self] in
-            guard let self = self else { return }
-
-            self.pingStatus = newFinalStatus
-            if clearResults {
-                self.engineErrorMessage = nil
-            }
-
-            if wasEffectivelyRunning || clearResults {
-                for result in self.results {
-                    let currentItemStatus = result.responseTime.lowercased()
-
-                    if clearResults ||
-                        ["pinging...", "paused", "pending", "restarting engine..."].contains(currentItemStatus) ||
-                        (newFinalStatus == "Stopped" && wasEffectivelyRunning) {
-                        result.responseTime = newFinalStatus
-                        result.isSuccessful = false
-                    }
-
-                    if clearResults {
-                        result.resetStats(initialStatus: "Cleared")
-                    }
+        if wasEffectivelyRunning || clearResults {
+            for result in results {
+                let currentItemStatus = result.responseTime.lowercased()
+                if clearResults ||
+                    ["pinging...", "paused", "pending"].contains(currentItemStatus) ||
+                    (newFinalStatus == "Stopped" && wasEffectivelyRunning) {
+                    result.responseTime = newFinalStatus
+                    result.isSuccessful = false
+                }
+                if clearResults {
+                    result.resetStats(initialStatus: "Cleared")
                 }
             }
-            self.updateTotalCounts()
         }
+        updateTotalCounts()
     }
 
-    @MainActor func prepareForAppTermination(clearResults: Bool) {
-        pingTaskGroup?.cancel()
-        pingTaskGroup = nil
+    func prepareForAppTermination(clearResults: Bool) {
+        fpingEngine.stop()
         pingStarted = false
         isPaused = false
         pingStatus = clearResults ? "Cleared" : "Stopped"
@@ -160,7 +251,7 @@ class PingManager: ObservableObject {
                 result.resetStats(initialStatus: "Cleared")
             }
         } else {
-            for result in results where ["pinging...", "paused", "pending", "restarting engine..."].contains(result.responseTime.lowercased()) {
+            for result in results where ["pinging...", "paused", "pending"].contains(result.responseTime.lowercased()) {
                 result.responseTime = "Stopped"
                 result.isSuccessful = false
                 result.clearCurrentLatency()
@@ -169,135 +260,7 @@ class PingManager: ObservableObject {
         updateTotalCounts()
     }
 
-    private func runPingLoop() async {
-        var consecutiveEngineRestartAttempts = 0
-
-        while !Task.isCancelled && pingStarted && !isPaused {
-            let roundStartTime = Date()
-            let timeoutMs = Int(currentTimeout) ?? 2000
-            let packetSize = Int(currentSize) ?? 32
-            let dscpValue = Int(currentDscp) ?? 0
-            let roundTargets = results.map {
-                FpingTarget(id: $0.id, value: $0.targetValue, type: $0.targetType)
-            }
-
-            do {
-                let roundResults = try await fpingEngine.probe(
-                    targets: roundTargets,
-                    timeoutMs: timeoutMs,
-                    packetSize: packetSize,
-                    dscp: dscpValue
-                )
-
-                guard !Task.isCancelled && pingStarted && !isPaused else { break }
-                await apply(roundResults: roundResults)
-                consecutiveEngineRestartAttempts = 0
-            } catch is CancellationError {
-                break
-            } catch {
-                if shouldRestartEngine(after: error, currentAttemptCount: consecutiveEngineRestartAttempts) {
-                    consecutiveEngineRestartAttempts += 1
-                    await markEngineRestartAttempt(error, attempt: consecutiveEngineRestartAttempts)
-                    do {
-                        try await Task.sleep(nanoseconds: engineRestartDelayNs)
-                    } catch {
-                        break
-                    }
-                    continue
-                }
-
-                await handleEngineFailure(error)
-                break
-            }
-
-            guard !Task.isCancelled && pingStarted && !isPaused else { break }
-
-            let roundDuration = Date().timeIntervalSince(roundStartTime)
-            let baseIntervalSeconds = TimeInterval(Int(self.currentInterval) ?? 5)
-            let sleepDuration = max(0.01, baseIntervalSeconds - roundDuration)
-
-            do {
-                try await Task.sleep(nanoseconds: UInt64(sleepDuration * 1_000_000_000.0))
-            } catch {
-                break
-            }
-        }
-    }
-
-    @MainActor private func apply(roundResults: [UUID: FpingProbeResult]) {
-        guard pingStarted, !isPaused else { return }
-
-        engineErrorMessage = nil
-
-        for result in results {
-            guard let probeResult = roundResults[result.id] else { continue }
-
-            result.responseTime = probeResult.responseTime
-            result.isSuccessful = probeResult.isSuccessful
-
-            if probeResult.isSuccessful {
-                result.successCount += 1
-                if let latencyMilliseconds = probeResult.latencyMilliseconds {
-                    result.recordLatency(milliseconds: latencyMilliseconds)
-                } else {
-                    result.clearCurrentLatency()
-                }
-            } else if !["paused", "stopped", "cancelled", "pinging...", "pending", "cleared"].contains(probeResult.responseTime.lowercased()) {
-                result.clearCurrentLatency()
-                result.failureCount += 1
-            } else {
-                result.clearCurrentLatency()
-            }
-
-            let totalPings = result.successCount + result.failureCount
-            result.failureRate = totalPings > 0 ? (Double(result.failureCount) / Double(totalPings)) * 100.0 : 0.0
-        }
-
-        updateTotalCounts()
-    }
-
-    private func shouldRestartEngine(after error: Error, currentAttemptCount: Int) -> Bool {
-        guard currentAttemptCount < maxEngineRestartAttempts else { return false }
-
-        if case FpingEngineError.timedOut = error {
-            return true
-        }
-
-        return false
-    }
-
-    @MainActor private func markEngineRestartAttempt(_ error: Error, attempt: Int) {
-        guard pingStarted, !isPaused else { return }
-
-        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        engineErrorMessage = "\(message) Restarting fping automatically (attempt \(attempt)/\(maxEngineRestartAttempts))."
-
-        for result in results where ["pinging...", "pending", "restarting engine..."].contains(result.responseTime.lowercased()) {
-            result.responseTime = "Restarting engine..."
-            result.isSuccessful = false
-            result.clearCurrentLatency()
-        }
-
-        updateTotalCounts()
-    }
-
-    @MainActor private func handleEngineFailure(_ error: Error) {
-        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-
-        pingStarted = false
-        isPaused = false
-        pingStatus = "Engine Unavailable"
-        engineErrorMessage = message
-
-        for result in results where ["pinging...", "pending"].contains(result.responseTime.lowercased()) {
-            result.responseTime = "Engine unavailable"
-            result.isSuccessful = false
-        }
-
-        updateTotalCounts()
-    }
-
-    @MainActor private func updateTotalCounts() {
+    private func updateTotalCounts() {
         let inactiveStatuses = ["pinging...", "pending", "paused", "stopped", "cleared", "cancelled", "engine unavailable", "restarting engine..."]
         reachableCount = results.filter { $0.isSuccessful && !inactiveStatuses.contains($0.responseTime.lowercased()) }.count
         failedCount = results.filter { !$0.isSuccessful && !inactiveStatuses.contains($0.responseTime.lowercased()) }.count
