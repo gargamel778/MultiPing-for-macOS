@@ -381,10 +381,15 @@ final class OUILookup {
         guard octets.count == 6 else { return nil }
         var hex = ""
         for o in octets { guard let v = UInt8(o, radix: 16) else { return nil }; hex += String(format: "%02X", v) }
-        if let first = UInt8(hex.prefix(2), radix: 16), (first & 0x02) != 0 { return "Locally administered" }
+        // Longest prefix first, and BEFORE the locally-administered check: IEEE
+        // assigns every CID with that bit set, so testing the bit first made all
+        // 219 CID registrations unreachable.
         for len in [9, 7, 6] where hex.count >= len {
             if let v = map[String(hex.prefix(len))] { return v }
         }
+        // Nothing registered matched; the bit means a randomised privacy MAC or
+        // a virtual/guest interface, which is worth saying.
+        if let first = UInt8(hex.prefix(2), radix: 16), (first & 0x02) != 0 { return "Locally administered" }
         return nil
     }
 }

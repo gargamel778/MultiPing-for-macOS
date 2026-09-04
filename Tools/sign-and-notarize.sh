@@ -60,8 +60,14 @@ echo "  notary profile:   $KEYCHAIN_PROFILE  (ok)"
 # ------------------------------------------------------------------- build
 say "Building Release with hardened runtime"
 rm -rf "$BUILD_DIR"
+# -destination is load-bearing. Without it xcodebuild resolves to THIS Mac and
+# narrows the build to its native arch, even though the Release config resolves
+# to ARCHS="arm64 x86_64" with ONLY_ACTIVE_ARCH=NO. That silently shipped an
+# arm64-only, fully notarized build that no Intel Mac could launch.
 xcodebuild -project "$PROJ_DIR/MultiPing.xcodeproj" -scheme "$SCHEME" \
   -configuration Release -derivedDataPath "$BUILD_DIR" \
+  -destination 'generic/platform=macOS' \
+  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
   DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_STYLE=Manual \
   CODE_SIGN_IDENTITY="$IDENTITY" \
   ENABLE_HARDENED_RUNTIME=YES \
@@ -69,6 +75,15 @@ xcodebuild -project "$PROJ_DIR/MultiPing.xcodeproj" -scheme "$SCHEME" \
   build | tail -3
 
 [ -d "$APP" ] || die "build produced no app at $APP"
+
+# Check the artifact, not the build settings — the settings claimed universal
+# while the output was thin.
+BUILT_ARCHS=$(lipo -archs "$APP/Contents/MacOS/${APP_NAME%.app}")
+echo "  architectures: $BUILT_ARCHS"
+case "$BUILT_ARCHS" in
+  *arm64*x86_64*|*x86_64*arm64*) ;;
+  *) die "expected a universal binary, got: $BUILT_ARCHS" ;;
+esac
 
 # ------------------------------------------------------------------- sign
 # Inside-out: every nested executable must be signed before the outer bundle,

@@ -241,7 +241,7 @@ struct MultiPingAboutView: View {
 
                 VStack(spacing: 3) {
                     Text("Acknowledgements").font(.caption).foregroundColor(.secondary)
-                    Text("Vendor data from the IEEE public registries (MA-L, MA-M, MA-S, IAB and CID). Bulk ICMP probing by fping, © Stanford University and contributors. Original application © 2025 u5f2094ee, MIT licence — see MultiPing_LICENSE.txt and fping_LICENSE.txt in the app bundle.")
+                    Text("Vendor data from the IEEE public registries (MA-L, MA-M, MA-S, IAB and CID).\n\nThis product includes software developed by Stanford University: the bundled fping, by Roland Schemers, Jeremy Cheng, Rick Rodgers, Scott Trihus and David Papp.\n\nOriginal application © 2025 u5f2094ee, MIT License. Full licence texts ship in the app bundle as MultiPing_LICENSE.txt and fping_LICENSE.txt (right-click the app ▸ Show Package Contents ▸ Contents/Resources).")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)

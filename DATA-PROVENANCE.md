@@ -41,8 +41,10 @@ same four files as Public Domain and has shipped them in Debian `main` since
 
 > https://metadata.ftp-master.debian.org/changelogs/main/i/ieee-data/ieee-data_20220827.1_copyright
 
-The app follows IEEE's encouragement literally: it fetches from IEEE directly
-and offers an in-app update rather than relying on a stale bundled copy.
+IEEE's encouragement is followed at the source: the bundled table is regenerated
+directly from the five registries by `Tools/refresh-oui.sh`, never copied from a
+redistribution. The iOS build additionally offers an in-app refresh that fetches
+from IEEE directly; the macOS build ships the generated snapshot.
 
 Independently of any licence, a registry of assigned numbers mapped to the
 organisation each was assigned to is a collection of facts, and under
