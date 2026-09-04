@@ -29,7 +29,7 @@ MultiPing is a lightweight macOS network monitoring utility for pinging many tar
 Added by this fork:
 
 - **Latency-over-time graphs** — per target, embedded in the list, or overlaid for several hosts at once.
-- **Network scan** — discovery by Bonjour, local subnet or an explicit IP range, with **MAC address and vendor (OUI)** identification and reverse-DNS host naming. Sweep results are completed from the ARP cache, because a fast `fping` sweep loses a substantial share of replies on its own.
+- **Network scan** — discovery by Bonjour, local subnet or an explicit IP range, with **MAC address and vendor (OUI)** identification and reverse-DNS host naming. Add everything found, or just a selection, to **My Hosts** — which persists across launches. Sweep results are completed from the ARP cache, because a fast `fping` sweep loses a substantial share of replies on its own.
 - **Menu-bar summary** with its own sort order, a hover list of failing hosts, and a one-minute latency graph per host.
 - **Per-host tools** — HTTP/HTTPS/SSH launchers and a port scanner.
 - **Live-editable probe settings**, changeable without stopping the session.
@@ -55,8 +55,10 @@ after a comma. IPv4, IPv6 and domain names can be mixed freely in one session.
 ![Targets Collector](assets/multiping-v2.0-targets.png)
 
 **Network Scan** — discover what is actually on the network by Bonjour, by local
-subnet, or across an explicit IP range, then send a selection straight into a
-ping session.
+subnet, or across an explicit IP range. Everything found is ticked by default,
+so you deselect what you don't want rather than picking hosts one at a time;
+**Select all** and **Select none** flip the whole list. The chosen hosts can go
+straight into a ping session, or be added to **My Hosts** to keep.
 
 ![Network scan](assets/multiping-v2.0-network-scan.png)
 
@@ -84,7 +86,10 @@ Supported target types:
 - IPv6 addresses
 - Domain names
 
-MultiPing remembers the last target list, so repeated checks can be restarted quickly.
+This list is **My Hosts**, and it persists across launches — it is saved
+whenever it changes and restored at startup, so repeated checks can be restarted
+immediately and a list built up over time is not lost on quit. Hosts found by a
+[Network Scan](#network-scan) can be appended to it directly.
 
 ### Probe settings
 
@@ -187,8 +192,22 @@ Discovery by three methods, which can be combined:
 - **IP range** — an explicit first and last address.
 
 Results carry the **MAC address** and the **vendor** derived from it, plus a
-reverse-DNS name where one exists. Selected hosts can be added to My Hosts or
-sent straight into a ping session.
+reverse-DNS name where one exists.
+
+Every discovered host starts **selected**, on the assumption that after running
+a scan you usually want most of what it found — so the work is deselecting the
+few you don't want, not ticking the many you do. **Select all** and **Select
+none** flip the entire list at once, and clicking a row toggles it.
+
+**Add to My Hosts** appends the selection to your saved target list, carrying
+the reverse-DNS name across as the note. It **skips anything already there**, so
+re-scanning the same network and adding again grows the list rather than
+duplicating it; if nothing is new it says so instead of appearing to do nothing.
+Hosts can equally be sent straight into a ping session without being saved.
+
+**My Hosts persists across launches.** It is written every time it changes and
+restored at startup, so the list you build up — by hand, by scanning, or both —
+is still there next time you open the app.
 
 Sweep results are completed from the ARP cache. This matters more than it
 sounds: a fast `fping` sweep loses a substantial share of replies to its own
