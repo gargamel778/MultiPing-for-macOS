@@ -202,7 +202,8 @@ struct MultiPingAboutView: View {
         return "Version \(short)"
     }
 
-    private let githubURL = URL(string: "https://github.com/u5f2094ee/MultiPing-for-macOS")!
+    private let upstreamURL = URL(string: "https://github.com/u5f2094ee/MultiPing-for-macOS")!
+    private let forkURL = URL(string: "https://github.com/gargamel778/MultiPing-for-macOS")!
 
     var body: some View {
         ScrollView {
@@ -223,13 +224,14 @@ struct MultiPingAboutView: View {
                 VStack(spacing: 3) {
                     Text("Developed by").font(.caption).foregroundColor(.secondary)
                     Text("Zhang Zheng, Gemini, and Codex").font(.callout.weight(.medium))
-                    Link("github.com/u5f2094ee/MultiPing-for-macOS", destination: githubURL).font(.caption)
+                    Link("github.com/u5f2094ee/MultiPing-for-macOS", destination: upstreamURL).font(.caption)
                 }
 
                 Divider().padding(.vertical, 2)
 
                 VStack(spacing: 6) {
                     Text("Fork · v2.0").font(.callout.weight(.semibold))
+                    Link("github.com/gargamel778/MultiPing-for-macOS", destination: forkURL).font(.caption)
                     Text("A customized build adding latency-over-time graphs (single, embedded, and multi-host), live-editable probe settings, and a network scanner — Bonjour, local-subnet, and IP-range discovery with MAC address + vendor (OUI) identification and reverse-DNS host naming — plus HTTP / HTTPS / SSH launchers and per-host port scanning.")
                         .font(.caption)
                         .foregroundColor(.secondary)

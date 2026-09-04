@@ -2,13 +2,16 @@
 
 MultiPing is a lightweight macOS network monitoring utility for pinging many targets at once. It is designed for network engineers, IT administrators, and power users who need a fast visual overview of host reachability, packet loss, and latency across IPv4, IPv6, and domain-name targets.
 
-![MultiPing overview](assets/multiping-v1.4-overview.png)
+![MultiPing v2.0 — List layout with the embedded latency graph](assets/multiping-v2.0-list.png)
 
-> **This is a fork, at v2.0.** It builds on
-> [u5f2094ee/MultiPing-for-macOS](https://github.com/u5f2094ee/MultiPing-for-macOS)
-> (v1.4) and adds latency-over-time graphs, a network scanner with MAC/vendor
-> identification, a menu-bar summary, per-host port scanning and live-editable
-> probe settings. The screenshot above still shows the v1.4 layout.
+> **This is a fork, at v2.0**, of
+> [u5f2094ee/MultiPing-for-macOS](https://github.com/u5f2094ee/MultiPing-for-macOS).
+> It adds latency-over-time graphs, a network scanner with MAC/vendor
+> identification, a menu-bar summary, per-host tools, and Developer ID signing
+> with Apple notarization so release builds launch without a Gatekeeper prompt.
+> Release builds are universal — Apple Silicon and Intel.
+>
+> **[Download the latest release →](https://github.com/gargamel778/MultiPing-for-macOS/releases/latest)**
 
 ---
 
@@ -30,6 +33,35 @@ Added by this fork:
 - **Menu-bar summary** with its own sort order, a hover list of failing hosts, and a one-minute latency graph per host.
 - **Per-host tools** — HTTP/HTTPS/SSH launchers and a port scanner.
 - **Live-editable probe settings**, changeable without stopping the session.
+
+---
+
+## What it looks like
+
+**Grid layout** — one card per target, sized to the window, colour-coded by state.
+
+![Grid layout](assets/multiping-v2.0-grid.png)
+
+**Multi-host latency** — overlay any selection of targets on one axis. Legend
+chips toggle a series; the bars beneath the plot are per-host loss lanes, so a
+target that stops replying leaves a visible trace instead of just vanishing from
+the line.
+
+![Multi-host latency graph](assets/multiping-v2.0-multi-host-graph.png)
+
+**Targets Collector** — paste or type targets, one per line, with optional notes
+after a comma. IPv4, IPv6 and domain names can be mixed freely in one session.
+
+![Targets Collector](assets/multiping-v2.0-targets.png)
+
+**Network Scan** — discover what is actually on the network by Bonjour, by local
+subnet, or across an explicit IP range, then send a selection straight into a
+ping session.
+
+![Network scan](assets/multiping-v2.0-network-scan.png)
+
+*(The screenshots use public DNS resolvers and RFC 5737 documentation addresses;
+the three failing rows are deliberate, to show how unreachable targets render.)*
 
 ---
 
@@ -128,6 +160,83 @@ Results can be exported from either layout as:
 - **HTML**
 
 Exported fields include target, type, note, current latency, average latency, minimum latency, maximum latency, success count, failure count, failure rate, and status.
+
+---
+
+## Added by this fork
+
+### Latency graphs
+
+Every target keeps a rolling latency history, viewable over **1m / 5m / 15m /
+60m / 1d**. Three presentations share one engine:
+
+- **Embedded** — a graph pinned under the results list for the selected target, with current/avg/min/max and the loss count for the window.
+- **Single-host window** — a detached window per target, so several can be watched side by side.
+- **Multi-host overlay** — any selection on one axis, with per-host loss lanes beneath the plot.
+
+Gaps are drawn as gaps. When the probe interval changes mid-session the spacing
+changes with it, rather than the line silently interpolating across a period
+when nothing was measured.
+
+### Network scan
+
+Discovery by three methods, which can be combined:
+
+- **Bonjour / mDNS** — anything advertising AirPlay, SSH, SMB, printing, HomeKit, Chromecast and similar.
+- **Local subnet** — computed from the host's own address and mask, with a host count shown before you commit.
+- **IP range** — an explicit first and last address.
+
+Results carry the **MAC address** and the **vendor** derived from it, plus a
+reverse-DNS name where one exists. Selected hosts can be added to My Hosts or
+sent straight into a ping session.
+
+Sweep results are completed from the ARP cache. This matters more than it
+sounds: a fast `fping` sweep loses a substantial share of replies to its own
+burst rate, and on the network this was developed against that left roughly 40%
+of live hosts undiscovered. Consulting the ARP table afterwards recovers them.
+
+### Menu-bar summary
+
+An optional status-item view showing targets at a glance without the main
+window: a configurable number of rows, **its own sort order** independent of the
+main window, a hover list of currently-failing hosts, and a one-minute latency
+graph per host on hover.
+
+### Per-host tools
+
+Right-click any target for HTTP / HTTPS / SSH launchers and a **port scanner**.
+
+### Live-editable probe settings
+
+Timeout, interval, packet size and DSCP can be changed while a session is
+running, without stopping and restarting it.
+
+---
+
+## Building a signed, notarized release
+
+`Tools/sign-and-notarize.sh` performs the whole pipeline: builds Release as a
+universal binary, signs nested helpers inside-out, submits to Apple, staples the
+ticket, verifies with `spctl`, then installs to `/Applications` — verifying the
+copy by checksum and rolling back to the previous version if either that or the
+Gatekeeper check fails.
+
+It needs two things of your own, neither of which lives in this repository:
+
+1. A **Developer ID Application** certificate — Xcode ▸ Settings ▸ Accounts ▸ Manage Certificates ▸ **+**. Note that `xcodebuild -allowProvisioningUpdates` cannot create one; it only handles development and App Store certificates.
+2. **Notarization credentials** in your keychain:
+
+   ```
+   xcrun notarytool store-credentials "MultiPing-Notary" \
+     --apple-id "you@example.com" --team-id "YOURTEAMID"
+   ```
+
+Then copy `Tools/signing.env.example` to `Tools/signing.env` (gitignored) and
+fill in your team ID, Apple ID and profile name:
+
+```
+./Tools/sign-and-notarize.sh
+```
 
 ---
 
