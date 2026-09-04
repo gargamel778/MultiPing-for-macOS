@@ -2,7 +2,13 @@
 
 MultiPing is a lightweight macOS network monitoring utility for pinging many targets at once. It is designed for network engineers, IT administrators, and power users who need a fast visual overview of host reachability, packet loss, and latency across IPv4, IPv6, and domain-name targets.
 
-![MultiPing v1.4 overview](assets/multiping-v1.4-overview.png)
+![MultiPing overview](assets/multiping-v1.4-overview.png)
+
+> **This is a fork, at v2.0.** It builds on
+> [u5f2094ee/MultiPing-for-macOS](https://github.com/u5f2094ee/MultiPing-for-macOS)
+> (v1.4) and adds latency-over-time graphs, a network scanner with MAC/vendor
+> identification, a menu-bar summary, per-host port scanning and live-editable
+> probe settings. The screenshot above still shows the v1.4 layout.
 
 ---
 
@@ -16,6 +22,14 @@ MultiPing is a lightweight macOS network monitoring utility for pinging many tar
 - **Latency statistics** for current, average, minimum, and maximum response time.
 - **DSCP marking** support for QoS testing.
 - **Export results** to CSV, HTML, or Excel-compatible `.xls` files.
+
+Added by this fork:
+
+- **Latency-over-time graphs** — per target, embedded in the list, or overlaid for several hosts at once.
+- **Network scan** — discovery by Bonjour, local subnet or an explicit IP range, with **MAC address and vendor (OUI)** identification and reverse-DNS host naming. Sweep results are completed from the ARP cache, because a fast `fping` sweep loses a substantial share of replies on its own.
+- **Menu-bar summary** with its own sort order, a hover list of failing hosts, and a one-minute latency graph per host.
+- **Per-host tools** — HTTP/HTTPS/SSH launchers and a port scanner.
+- **Live-editable probe settings**, changeable without stopping the session.
 
 ---
 
@@ -119,7 +133,7 @@ Exported fields include target, type, note, current latency, average latency, mi
 
 ## Engine and reliability
 
-MultiPing v1.4 uses a bundled `fping` helper for bulk ICMP probing. IPv4/domain targets and IPv6 targets are processed in separate `fping` batches, improving efficiency for larger target sets.
+MultiPing uses a bundled `fping` helper for bulk ICMP probing. IPv4/domain targets and IPv6 targets are processed in separate `fping` batches, improving efficiency for larger target sets.
 
 The app intentionally does not silently fall back to the legacy system `ping` command. If the bundled engine is missing, not executable, or returns a fatal error, MultiPing stops the test and displays repair guidance instead of showing misleading results.
 
@@ -146,11 +160,12 @@ The current project targets **macOS 13.5 or later**. Because the project file us
 
 ## Release app notes
 
-If you launch a downloaded release build and macOS blocks it, open:
-
-**System Settings → Privacy & Security**
-
-Then choose **Open Anyway** for MultiPing.
+Builds produced by `Tools/sign-and-notarize.sh` are signed with a Developer ID
+certificate and notarized by Apple, with the ticket stapled, so they launch
+without any Gatekeeper prompt and validate offline. If you build the app
+yourself in Xcode without that certificate, the result is ad-hoc signed and
+macOS *will* block it — in that case open **System Settings → Privacy &
+Security** and choose **Open Anyway**.
 
 Do not remove the bundled `fping` file from the app package. MultiPing depends on it for ICMP probing.
 
@@ -159,14 +174,29 @@ Do not remove the bundled `fping` file from the app package. MultiPing depends o
 ## Requirements
 
 - macOS 13.5 or later
-- Apple Silicon or Intel Mac
+- Apple Silicon or Intel Mac — release builds are universal (`arm64` + `x86_64`)
 - Bundled `fping` helper included in the app resources
 
 ---
 
-## Third-party component
+## Third-party components
 
-MultiPing includes a bundled `fping` helper for ICMP probing. See `MultiPing/fping_LICENSE.txt` for the bundled helper license.
+**fping** — bundled for ICMP probing. This product includes software developed
+by Stanford University, by Roland Schemers, Jeremy Cheng, Rick Rodgers, Scott
+Trihus and David Papp. Licence text ships in the app bundle and in the source
+tree as `fping_LICENSE.txt`.
+
+**MAC vendor data** — `MultiPing/oui.txt` is generated from the IEEE
+Registration Authority's public registries (MA-L, MA-M, MA-S, IAB and CID) by
+`Tools/refresh-oui.sh` in the companion MultiPing-iOS repository. It is not
+derived from any redistribution of that data. See
+[DATA-PROVENANCE.md](DATA-PROVENANCE.md) for the sources and why they may be
+redistributed.
+
+**Upstream project** — this fork is derived from
+[u5f2094ee/MultiPing-for-macOS](https://github.com/u5f2094ee/MultiPing-for-macOS),
+© 2025 u5f2094ee, MIT License. The notice ships in the app bundle as
+`MultiPing_LICENSE.txt` and in the source tree as [LICENSE](LICENSE).
 
 ---
 
