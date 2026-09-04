@@ -3,3 +3,6 @@ build/
 DerivedData/
 xcuserdata/
 *.xcuserstate
+
+# Personal signing identifiers — never commit
+Tools/signing.env

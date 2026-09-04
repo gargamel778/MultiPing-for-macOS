@@ -13,22 +13,32 @@
 #      Xcode ▸ Settings ▸ Accounts ▸ (your team) ▸ Manage Certificates ▸ +
 #           ▸ "Developer ID Application"
 #
-#   2. Notarization credentials stored in the keychain under the profile name
-#      below. Create an app-specific password at appleid.apple.com (Sign-In and
+#   2. Notarization credentials stored in the keychain under your profile name.
+#      Create an app-specific password at appleid.apple.com (Sign-In and
 #      Security ▸ App-Specific Passwords), then run:
 #
-#        xcrun notarytool store-credentials "MultiPing-Notary" \
-#          --apple-id "$MULTIPING_APPLE_ID" --team-id "<your-team-id>"
+#        xcrun notarytool store-credentials "$MULTIPING_NOTARY_PROFILE" \
+#          --apple-id "$MULTIPING_APPLE_ID" --team-id "$MULTIPING_TEAM_ID"
 #
 #      It prompts for that password and stores it in your keychain. Nothing in
 #      this script ever sees or handles the password.
 #
+#   3. Your own identifiers, in Tools/signing.env — copy Tools/signing.env.example
+#      and fill it in. That file is gitignored; the example is not.
+#
 set -euo pipefail
 
-TEAM="<your-team-id>"
 SCHEME="MultiPing for macOS"
 APP_NAME="MultiPing for macOS.app"
-KEYCHAIN_PROFILE="MultiPing-Notary"
+
+# Identifiers come from Tools/signing.env (untracked) or the environment, so no
+# personal account details live in the repository.
+CONFIG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/signing.env"
+# shellcheck source=/dev/null
+[ -f "$CONFIG" ] && . "$CONFIG"
+TEAM="${MULTIPING_TEAM_ID:-}"
+APPLE_ID="${MULTIPING_APPLE_ID:-}"
+KEYCHAIN_PROFILE="${MULTIPING_NOTARY_PROFILE:-MultiPing-Notary}"
 INSTALL_DIR="/Applications"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,6 +51,9 @@ die() { printf '\n\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- preflight
 say "Preflight"
+
+[ -n "$TEAM" ] || die "No team ID. Copy Tools/signing.env.example to Tools/signing.env
+       and set MULTIPING_TEAM_ID, or export it in the environment."
 
 # `|| true` matters: grep exits 1 when there is no match, and under
 # `set -e -o pipefail` that would abort the script here — before the helpful
