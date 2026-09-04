@@ -106,7 +106,9 @@ while IFS= read -r bin; do
   echo "  nested: ${bin#$APP/}"
   codesign --force --sign "$IDENTITY" --timestamp --options runtime "$bin"
 done < <(find "$APP/Contents/Resources" "$APP/Contents/Frameworks" \
-              -type f -perm +111 2>/dev/null)
+              -type f -print0 2>/dev/null \
+         | xargs -0 file --mime-type 2>/dev/null \
+         | awk -F': ' '$2 ~ /application\/x-mach-binary/ {print $1}')
 
 codesign --force --sign "$IDENTITY" --timestamp --options runtime \
          --entitlements "$PROJ_DIR/MultiPing/MultiPing.entitlements" "$APP"
