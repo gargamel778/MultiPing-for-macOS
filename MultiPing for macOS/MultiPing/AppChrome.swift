@@ -236,6 +236,17 @@ struct MultiPingAboutView: View {
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                Divider().padding(.vertical, 2)
+
+                VStack(spacing: 3) {
+                    Text("Acknowledgements").font(.caption).foregroundColor(.secondary)
+                    Text("Vendor data from the IEEE public registries (MA-L, MA-M, MA-S, IAB and CID). Bulk ICMP probing by fping, © Stanford University and contributors. Original application © 2025 u5f2094ee, MIT licence — see MultiPing_LICENSE.txt and fping_LICENSE.txt in the app bundle.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(28)
             .frame(maxWidth: .infinity)
